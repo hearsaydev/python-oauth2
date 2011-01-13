@@ -30,13 +30,20 @@ import hmac
 import binascii
 import httplib2
 
+from urlparse import parse_qs, parse_qsl
+
 try:
-    from urlparse import parse_qs
+    from hashlib import sha1
+    sha = sha1
 except ImportError:
-    from cgi import parse_qs
+    # hashlib was added in Python 2.5
+    import sha
 
+import _version
 
-VERSION = '1.0'  # Hi Blaine!
+__version__ = _version.__version__
+
+OAUTH_VERSION = '1.0'  # Hi Blaine!
 HTTP_METHOD = 'GET'
 SIGNATURE_METHOD = 'PLAINTEXT'
 
@@ -81,10 +88,22 @@ def build_xoauth_string(url, consumer, token=None):
     return "%s %s %s" % ("GET", url, ','.join(params))
 
 
+def to_unicode(s):
+    """ Convert to unicode, raise exception with instructive error
+    message if s is not unicode or ascii. """
+    if not isinstance(s, unicode):
+        if not isinstance(s, str):
+            raise TypeError('You are required to pass either unicode or string here, not: %r (%s)' % (type(s), s))
+        try:
+            s = s.decode('ascii')
+        except UnicodeDecodeError, le:
+            raise TypeError('You are required to pass either a unicode object or an ascii string here. You passed a Python string object which contained non-ascii: %r. The UnicodeDecodeError that resulted from attempting to interpret it as ascii was: %s' % (s, le,))
+    return s
+
 def escape(s):
     """Escape a URL including any /."""
-    return urllib.quote(s, safe='~')
-
+    s = to_unicode(s)
+    return urllib.quote(s.encode('utf-8'), safe='~')
 
 def generate_timestamp():
     """Get seconds since epoch (UTC)."""
@@ -266,11 +285,12 @@ class Request(dict):
  
     """
  
-    version = VERSION
+    version = OAUTH_VERSION
  
     def __init__(self, method=HTTP_METHOD, url=None, parameters=None):
+        if url is not None:
+            self.url = to_unicode(url)
         self.method = method
-        self.url = url
         if parameters is not None:
             self.update(parameters)
  
@@ -537,8 +557,7 @@ class Client(httplib2.Http):
         self.token = token
         self.method = SignatureMethod_HMAC_SHA1()
 
-        httplib2.Http.__init__(self, cache=cache, timeout=timeout, 
-            proxy_info=proxy_info)
+        httplib2.Http.__init__(self, cache=cache, timeout=timeout, proxy_info=proxy_info)
 
     def set_signature_method(self, method):
         if not isinstance(method, SignatureMethod):
@@ -594,7 +613,7 @@ class Server(object):
     """
 
     timestamp_threshold = 300 # In seconds, five minutes.
-    version = VERSION
+    version = OAUTH_VERSION
     signature_methods = None
 
     def __init__(self, signature_methods=None):
@@ -607,7 +626,7 @@ class Server(object):
     def verify_request(self, request, consumer, token):
         """Verifies an api call and checks all the parameters."""
 
-        version = self._get_version(request)
+        self._check_version(request)
         self._check_signature(request, consumer, token)
         parameters = request.get_nonoauth_parameters()
         return parameters
@@ -616,15 +635,18 @@ class Server(object):
         """Optional support for the authenticate header."""
         return {'WWW-Authenticate': 'OAuth realm="%s"' % realm}
 
+    def _check_version(self, request):
+        """Verify the correct version of the request for this server."""
+        version = self._get_version(request)
+        if version and version != self.version:
+            raise Error('OAuth version %s not supported.' % str(version))
+
     def _get_version(self, request):
-        """Verify the correct version request for this server."""
+        """Return the version of the request for this server."""
         try:
             version = request.get_parameter('oauth_version')
         except:
-            version = VERSION
-
-        if version and version != self.version:
-            raise Error('OAuth version %s not supported.' % str(version))
+            version = OAUTH_VERSION
 
         return version
 
@@ -665,8 +687,6 @@ class Server(object):
 
             raise Error('Invalid signature. Expected signature base ' 
                 'string: %s' % base)
-
-        built = signature_method.sign(request, consumer, token)
 
     def _check_timestamp(self, timestamp):
         """Verify that timestamp is recentish."""
@@ -719,7 +739,7 @@ class SignatureMethod_HMAC_SHA1(SignatureMethod):
     name = 'HMAC-SHA1'
         
     def signing_base(self, request, consumer, token):
-        if request.normalized_url is None:
+        if not hasattr(request, 'normalized_url') or request.normalized_url is None:
             raise ValueError("Base URL for request is not set.")
 
         sig = (
@@ -737,12 +757,6 @@ class SignatureMethod_HMAC_SHA1(SignatureMethod):
     def sign(self, request, consumer, token):
         """Builds the base signature string."""
         key, raw = self.signing_base(request, consumer, token)
-
-        # HMAC object.
-        try:
-            from hashlib import sha1 as sha
-        except ImportError:
-            import sha # Deprecated
 
         hashed = hmac.new(key, raw, sha)
 
